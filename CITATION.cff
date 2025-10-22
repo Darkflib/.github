@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 title: "${project.name}"
 authors:
-  - family-names: "Surname"
-    given-names: "Name"
+  - family-names: "Preston"
+    given-names: "Mike"
 repository-code: "https://github.com/${owner}/${name}"
 license: "${license}"
