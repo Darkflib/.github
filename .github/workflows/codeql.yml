@@ -13,5 +13,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3
-        with: { languages: "${primary_language}" }
+        with: { languages: "python" }
       - uses: github/codeql-action/analyze@v3
