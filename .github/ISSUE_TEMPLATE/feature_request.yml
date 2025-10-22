@@ -1,0 +1,8 @@
+name: "Feature request"
+description: "Suggest an idea"
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: value
+    attributes: { label: "Value", description: "Who benefits and how?" }
+    validations: { required: true }
