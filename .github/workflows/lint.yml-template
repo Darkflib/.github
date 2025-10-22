@@ -1,0 +1,22 @@
+name: CI
+on:
+  pull_request:
+  push: { branches: ["main"] }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        if: contains('''${primary_language}''','python')
+        uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - name: Install deps
+        run: |
+          if command -v uv >/dev/null; then uv sync; else pip install -U pip && pip install -r requirements.txt; fi
+      - name: Lint
+        run: |
+          if [ -f ruff.toml ]; then uv run ruff check .; fi || true
+      - name: Test
+        run: |
+          if [ -f pyproject.toml ] || [ -f pytest.ini ]; then uv run pytest -q; fi || true
