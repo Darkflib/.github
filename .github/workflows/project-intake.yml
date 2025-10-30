@@ -81,54 +81,108 @@ jobs:
           logging.info("Project item id: %s", item_id)
 
           # 3) Cache fields
-          fields = {}
+          fields_by_name = {}
           after = None
           q_fields = """
-          query F($id:ID!,$after:String){
-            node(id:$id){
+          query F($id:ID!, $after:String) {
+            node(id:$id) {
               ... on ProjectV2 {
-                fields(first:50, after:$after){
-                  nodes{
-                    id name dataType
-                    ... on ProjectV2SingleSelectField { options { id name } }
+                fields(first:50, after:$after) {
+                  nodes {
+                    __typename
+          
+                    # Base/simple fields (Text, Number, Date, etc.)
+                    ... on ProjectV2Field {
+                      id
+                      name
+                      dataType  # e.g. TEXT, NUMBER, DATE
+                    }
+          
+                    # Single-select fields (Status and any custom single-selects)
+                    ... on ProjectV2SingleSelectField {
+                      id
+                      name
+                      dataType  # SINGLE_SELECT
+                      options { id name }
+                    }
+          
+                    # Iteration fields (if your project uses them)
+                    ... on ProjectV2IterationField {
+                      id
+                      name
+                      dataType  # ITERATION
+                      configuration {
+                        iterations { id title }
+                      }
+                    }
+          
+                    # Add more fragments here if you adopt newer field types in future
+                    # (e.g., ProjectV2RepositoryField, ProjectV2MilestoneField), but they
+                    # are not needed for RICE/Status use-cases.
                   }
-                  pageInfo{ hasNextPage endCursor }
+                  pageInfo { hasNextPage endCursor }
                 }
               }
             }
-          }"""
+          }
+          """
+          
           while True:
-            dd = gql(q_fields, {"id": project_id, "after": after})
-            fs = dd["node"]["fields"]
-            for f in fs["nodes"]:
-              fields[f["name"]] = f
-            if fs["pageInfo"]["hasNextPage"]:
-              after = fs["pageInfo"]["endCursor"]
+            data = gql(q_fields, {"id": project_id, "after": after}, op="F")
+            fnode = data["node"]["fields"]
+            for n in fnode["nodes"]:
+              t = n.get("__typename")
+              # normalise to a common shape
+              base = {
+                "id": n.get("id"),
+                "name": n.get("name"),
+                "dataType": n.get("dataType"),
+                "__typename": t
+              }
+              if not base["name"]:
+                continue  # skip unnamed/system fields
+              if t == "ProjectV2SingleSelectField":
+                base["options"] = {opt["name"]: opt["id"] for opt in (n.get("options") or [])}
+              elif t == "ProjectV2IterationField":
+                base["iterations"] = {it["title"]: it["id"] for it in (n.get("configuration", {}).get("iterations") or [])}
+              fields_by_name[base["name"]] = base
+          
+            if fnode["pageInfo"]["hasNextPage"]:
+              after = fnode["pageInfo"]["endCursor"]
             else:
               break
-
-          def set_number(name, val):
-            f = fields.get(name)
+          
+          logging.info("Loaded %d fields: %s", len(fields_by_name), ", ".join(sorted(fields_by_name.keys())))
+          
+          def set_number(field_name: str, value: float):
+            f = fields_by_name.get(field_name)
             if not f or f["dataType"] != "NUMBER":
-              logging.warning("Number field %s missing; skipping", name); return
+              logging.warning("Number field %s missing or wrong type; skipping", field_name)
+              return
             q = """mutation U($p:ID!,$i:ID!,$f:ID!,$v:Float!){
               updateProjectV2ItemFieldValue(input:{
                 projectId:$p,itemId:$i,fieldId:$f,value:{number:$v}
-              }){ projectV2Item{id} }}"""
-            gql(q, {"p": project_id, "i": item_id, "f": f["id"], "v": float(val)})
-
-          def set_select(name, option):
-            f = fields.get(name)
-            if not f or f["dataType"] != "SINGLE_SELECT":
-              logging.warning("Select field %s missing; skipping", name); return
-            opts = {o["name"]:o["id"] for o in (f.get("options") or [])}
-            if option not in opts:
-              logging.warning("Option %s not found in %s; skipping", option, name); return
+              }){ projectV2Item { id } }
+            }"""
+            gql(q, {"p": project_id, "i": item_id, "f": f["id"], "v": float(value)})
+          
+          def set_select(field_name: str, option_name: str):
+            f = fields_by_name.get(field_name)
+            if not f or f["__typename"] != "ProjectV2SingleSelectField":
+              logging.warning("Select field %s missing/not single-select; skipping", field_name)
+              return
+            opt_id = f.get("options", {}).get(option_name)
+            if not opt_id:
+              logging.warning("Option %s not found in %s; available: %s",
+                              option_name, field_name, ", ".join(f.get("options", {}).keys()))
+              return
             q = """mutation U($p:ID!,$i:ID!,$f:ID!,$o:String!){
               updateProjectV2ItemFieldValue(input:{
                 projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}
-              }){ projectV2Item{id} }}"""
-            gql(q, {"p": project_id, "i": item_id, "f": f["id"], "o": opts[option]})
+              }){ projectV2Item { id } }
+            }"""
+            gql(q, {"p": project_id, "i": item_id, "f": f["id"], "o": opt_id})
+
 
           # 4) Parse Impact/Reach/Confidence/Effort from body frontmatter or labels like impact:8
           def extract_num(name):
