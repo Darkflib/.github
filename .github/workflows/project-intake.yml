@@ -18,6 +18,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN_FOR_PROJECTS }}
           ORG_LOGIN: ${{ inputs.org_login }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+          OWNER_KIND: ${{ input.owner_kind }} # user or organization
           PROJECT_NUMBER: ${{ inputs.project_number }}
           ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
           ISSUE_BODY: ${{ github.event.issue.body }}
@@ -29,11 +31,14 @@ jobs:
 
           GQL = "https://api.github.com/graphql"
           token = os.environ["GITHUB_TOKEN"]
-          org = os.environ["ORG_LOGIN"]
+          org_login = os.environ["ORG_LOGIN"]
           project_num = int(os.environ["PROJECT_NUMBER"])
           issue_node_id = os.environ["ISSUE_NODE_ID"]
           issue_body = os.environ.get("ISSUE_BODY") or ""
           labels = [l.get("name","") for l in json.loads(os.environ.get("ISSUE_LABELS_JSON") or "[]")]
+          # Detect project owner type explicitly via env, or auto-fallback.
+          owner_login = os.environ.get("OWNER_LOGIN", os.environ.get("ORG_LOGIN"))  # keep backwards-compat
+          owner_kind = os.environ.get("OWNER_KIND", "user")  # "user" or "organization"
 
           s = requests.Session()
           s.headers.update({"Authorization": f"Bearer {token}", "Accept":"application/vnd.github+json"})
@@ -49,9 +54,24 @@ jobs:
               raise SystemExit(f"GraphQL errors: {data['errors']}")
             return data["data"]
 
+          def get_project_id(kind: str, login: str, number: int) -> str:
+            if kind == "organization":
+              q = 'query($login:String!, $num:Int!){ organization(login:$login){ projectV2(number:$num){ id }}}'
+              path = ["organization", "projectV2"]
+            else:
+              q = 'query($login:String!, $num:Int!){ user(login:$login){ projectV2(number:$num){ id }}}'
+              path = ["user", "projectV2"]
+            d = gql(q, {"login": login, "num": number})
+            node = d.get(path[0], {}).get(path[1])
+            if not node:
+              raise SystemExit(f"Project not found for {kind} '{login}' number {number}")
+            return node["id"]
+    
+
           # 1) Resolve project id
-          q_proj = """query Q($org:String!,$num:Int!){ organization(login:$org){ projectV2(number:$num){ id } } }"""
-          project_id = gql(q_proj, {"org":org, "num":project_num})["organization"]["projectV2"]["id"]
+          #q_proj = """query Q($org:String!,$num:Int!){ organization(login:$org){ projectV2(number:$num){ id } } }"""
+          #project_id = gql(q_proj, {"org":org, "num":project_num})["organization"]["projectV2"]["id"]
+          project_id = get_project_id(owner_kind, owner_login, int(os.environ["PROJECT_NUMBER"]))
 
           # 2) Ensure item exists in project (idempotent: adding existing content is fine)
           q_add = """mutation M($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }"""
