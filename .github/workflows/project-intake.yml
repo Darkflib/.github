@@ -28,23 +28,26 @@ jobs:
           ISSUE_LABELS_JSON: ${{ toJson(github.event.issue.labels) }}
         run: |
           python - <<'PY'
-          import os, re, json, time, logging, requests
+          import os, re, json, logging, requests, sys
           logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s %(message)s")
-
+          
           GQL = "https://api.github.com/graphql"
-          token = os.environ["GITHUB_TOKEN"]
-          org_login = os.environ["ORG_LOGIN"]
-          project_num = int(os.environ["PROJECT_NUMBER"])
-          issue_node_id = os.environ["ISSUE_NODE_ID"]
+          token = os.environ.get("GITHUB_TOKEN")
+          if not token:
+            logging.error("GITHUB_TOKEN (GH_TOKEN_FOR_PROJECTS) is not set. Exiting.")
+            raise SystemExit(1)
+          org_login = os.environ.get("ORG_LOGIN")
+          project_num = int(os.environ.get("PROJECT_NUMBER") or 0)
+          issue_node_id = os.environ.get("ISSUE_NODE_ID")
           issue_body = os.environ.get("ISSUE_BODY") or ""
           labels = [l.get("name","") for l in json.loads(os.environ.get("ISSUE_LABELS_JSON") or "[]")]
           # Detect project owner type explicitly via env, or auto-fallback.
-          owner_login = os.environ.get("OWNER_LOGIN", os.environ.get("ORG_LOGIN"))  # keep backwards-compat
+          owner_login = os.environ.get("OWNER_LOGIN") or org_login  # keep backwards-compat
           owner_kind = os.environ.get("OWNER_KIND", "user")  # "user" or "organization"
-
+          
           s = requests.Session()
           s.headers.update({"Authorization": f"Bearer {token}", "Accept":"application/vnd.github+json"})
-
+          
           def gql(query, variables, op=None):
             payload = {"query": query, "variables": variables}
             if op: payload["operationName"] = op
@@ -55,7 +58,7 @@ jobs:
             if "errors" in data:
               raise SystemExit(f"GraphQL errors: {data['errors']}")
             return data["data"]
-
+          
           def get_project_id(kind: str, login: str, number: int) -> str:
             if kind == "organization":
               q = 'query($login:String!, $num:Int!){ organization(login:$login){ projectV2(number:$num){ id }}}'
@@ -68,19 +71,21 @@ jobs:
             if not node:
               raise SystemExit(f"Project not found for {kind} '{login}' number {number}")
             return node["id"]
-    
-
+          
+          # Validate issue node id
+          if not issue_node_id:
+            logging.error("ISSUE_NODE_ID is not present in the workflow context. This workflow expects an issue event context.")
+            raise SystemExit(1)
+          
           # 1) Resolve project id
-          #q_proj = """query Q($org:String!,$num:Int!){ organization(login:$org){ projectV2(number:$num){ id } } }"""
-          #project_id = gql(q_proj, {"org":org, "num":project_num})["organization"]["projectV2"]["id"]
-          project_id = get_project_id(owner_kind, owner_login, int(os.environ["PROJECT_NUMBER"]))
-
-          # 2) Ensure item exists in project (idempotent: adding existing content is fine)
+          project_id = get_project_id(owner_kind, owner_login, project_num)
+          
+          # 2) Ensure item exists in project (idempotent)
           q_add = """mutation M($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }"""
           item_id = gql(q_add, {"p": project_id, "c": issue_node_id})["addProjectV2ItemById"]["item"]["id"]
           logging.info("Project item id: %s", item_id)
-
-          # 3) Cache fields
+          
+          # 3) Cache fields (with detailed logging)
           fields_by_name = {}
           after = None
           q_fields = """
@@ -90,35 +95,25 @@ jobs:
                 fields(first:50, after:$after) {
                   nodes {
                     __typename
-          
-                    # Base/simple fields (Text, Number, Date, etc.)
                     ... on ProjectV2Field {
                       id
                       name
-                      dataType  # e.g. TEXT, NUMBER, DATE
+                      dataType
                     }
-          
-                    # Single-select fields (Status and any custom single-selects)
                     ... on ProjectV2SingleSelectField {
                       id
                       name
-                      dataType  # SINGLE_SELECT
+                      dataType
                       options { id name }
                     }
-          
-                    # Iteration fields (if your project uses them)
                     ... on ProjectV2IterationField {
                       id
                       name
-                      dataType  # ITERATION
+                      dataType
                       configuration {
                         iterations { id title }
                       }
                     }
-          
-                    # Add more fragments here if you adopt newer field types in future
-                    # (e.g., ProjectV2RepositoryField, ProjectV2MilestoneField), but they
-                    # are not needed for RICE/Status use-cases.
                   }
                   pageInfo { hasNextPage endCursor }
                 }
@@ -126,54 +121,71 @@ jobs:
             }
           }
           """
-          
           while True:
             data = gql(q_fields, {"id": project_id, "after": after}, op="F")
             fnode = data["node"]["fields"]
             for n in fnode["nodes"]:
               t = n.get("__typename")
-              # normalise to a common shape
+              name = n.get("name")
+              if not name:
+                continue
               base = {
                 "id": n.get("id"),
-                "name": n.get("name"),
+                "name": name,
                 "dataType": n.get("dataType"),
                 "__typename": t
               }
-              if not base["name"]:
-                continue  # skip unnamed/system fields
               if t == "ProjectV2SingleSelectField":
                 base["options"] = {opt["name"]: opt["id"] for opt in (n.get("options") or [])}
               elif t == "ProjectV2IterationField":
                 base["iterations"] = {it["title"]: it["id"] for it in (n.get("configuration", {}).get("iterations") or [])}
               fields_by_name[base["name"]] = base
-          
             if fnode["pageInfo"]["hasNextPage"]:
               after = fnode["pageInfo"]["endCursor"]
             else:
               break
           
-          logging.info("Loaded %d fields: %s", len(fields_by_name), ", ".join(sorted(fields_by_name.keys())))
+          logging.info("Loaded %d fields", len(fields_by_name))
+          for k, v in sorted(fields_by_name.items()):
+            logging.info("Field: %s -> id:%s dataType:%s __typename:%s options:%s", k, v.get("id"), v.get("dataType"), v.get("__typename"), ", ".join(v.get("options", {}).keys()) if v.get("options") else "")
+          
+          def is_number_field(f):
+            # Accept either explicit NUMBER dataType, or base ProjectV2Field with dataType NUMBER
+            return (f.get("dataType") == "NUMBER") or (f.get("__typename") == "ProjectV2Field" and f.get("dataType") == "NUMBER")
+          
+          def is_single_select_field(f):
+            return (f.get("__typename") == "ProjectV2SingleSelectField") or (f.get("dataType") == "SINGLE_SELECT")
           
           def set_number(field_name: str, value: float):
             f = fields_by_name.get(field_name)
-            if not f or f["dataType"] != "NUMBER":
-              logging.warning("Number field %s missing or wrong type; skipping", field_name)
+            if not f:
+              logging.warning("Number field %s not found; skipping", field_name)
+              return
+            if not is_number_field(f):
+              logging.warning("Field %s is not a NUMBER field (dataType=%s __typename=%s); skipping", field_name, f.get("dataType"), f.get("__typename"))
               return
             q = """mutation U($p:ID!,$i:ID!,$f:ID!,$v:Float!){
               updateProjectV2ItemFieldValue(input:{
                 projectId:$p,itemId:$i,fieldId:$f,value:{number:$v}
               }){ projectV2Item { id } }
             }"""
-            gql(q, {"p": project_id, "i": item_id, "f": f["id"], "v": float(value)})
+            try:
+              gql(q, {"p": project_id, "i": item_id, "f": f["id"], "v": float(value)})
+              logging.info("Set number %s = %s", field_name, value)
+            except Exception as e:
+              logging.error("Failed to set number field %s: %s", field_name, e)
           
           def set_select(field_name: str, option_name: str):
             f = fields_by_name.get(field_name)
-            if not f or f["__typename"] != "ProjectV2SingleSelectField":
-              logging.warning("Select field %s missing/not single-select; skipping", field_name)
+            if not f:
+              logging.warning("Select field %s not found; skipping", field_name)
+              return
+            if not is_single_select_field(f):
+              logging.warning("Field %s is not a SINGLE_SELECT field (dataType=%s __typename=%s); skipping", field_name, f.get("dataType"), f.get("__typename"))
               return
             opt_id = f.get("options", {}).get(option_name)
             if not opt_id:
-              logging.warning("Option %s not found in %s; available: %s",
+              logging.warning("Option '%s' not found in %s; available: %s",
                               option_name, field_name, ", ".join(f.get("options", {}).keys()))
               return
             q = """mutation U($p:ID!,$i:ID!,$f:ID!,$o:String!){
@@ -181,34 +193,35 @@ jobs:
                 projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}
               }){ projectV2Item { id } }
             }"""
-            gql(q, {"p": project_id, "i": item_id, "f": f["id"], "o": opt_id})
-
-
+            try:
+              gql(q, {"p": project_id, "i": item_id, "f": f["id"], "o": opt_id})
+              logging.info("Set select %s -> %s", field_name, option_name)
+            except Exception as e:
+              logging.error("Failed to set select field %s to %s: %s", field_name, option_name, e)
+          
           # 4) Parse Impact/Reach/Confidence/Effort from body frontmatter or labels like impact:8
           def extract_num(name):
-            # frontmatter style: "Impact: 8" or "impact: 8"
             m = re.search(rf"(?im)^{name}\s*:\s*([0-9]+(?:\.[0-9]+)?)\b", issue_body)
             if m: return float(m.group(1))
-            # label style: "impact:8"
             for lbl in labels:
               if lbl.lower().startswith(name.lower()+":"):
                 try: return float(lbl.split(":",1)[1])
                 except: pass
             return None
-
+          
           Impact = extract_num("Impact") or 5.0
           Reach = extract_num("Reach") or 1.0
           Confidence = extract_num("Confidence") or 0.8
           Effort = extract_num("Effort") or 3.0
           RICE = (Reach * Impact * Confidence) / max(Effort, 0.5)
-
+          
           set_number("Impact", Impact)
           set_number("Reach", Reach)
           set_number("Confidence", Confidence)
           set_number("Effort", Effort)
           set_number("RICE", RICE)
-
-          # Optional default Status
+          
+          # Optional default Status (only if Status is single-select)
           set_select("Status", "Inbox")
           logging.info("RICE=%.2f (Reach=%.1f Impact=%.1f Confidence=%.2f Effort=%.1f)", RICE, Reach, Impact, Confidence, Effort)
           PY
