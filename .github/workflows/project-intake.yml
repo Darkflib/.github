@@ -7,7 +7,7 @@ on:
       owner_kind: {type: string, required: true}
       project_number: {type: string, required: true}
     secrets:
-      GH_TOKEN_FOR_PROJECTS: {required: true}   # fine-grained PAT or GitHub App token
+      GH_TOKEN_FOR_PROJECTS: {required: true}
 jobs:
   run:
     permissions: {}  # use the passed token, not GITHUB_TOKEN
@@ -41,9 +41,8 @@ jobs:
           issue_node_id = os.environ.get("ISSUE_NODE_ID")
           issue_body = os.environ.get("ISSUE_BODY") or ""
           labels = [l.get("name","") for l in json.loads(os.environ.get("ISSUE_LABELS_JSON") or "[]")]
-          # Detect project owner type explicitly via env, or auto-fallback.
-          owner_login = os.environ.get("OWNER_LOGIN") or org_login  # keep backwards-compat
-          owner_kind = os.environ.get("OWNER_KIND", "user")  # "user" or "organization"
+          owner_login = os.environ.get("OWNER_LOGIN") or org_login
+          owner_kind = os.environ.get("OWNER_KIND", "user")
           
           s = requests.Session()
           s.headers.update({"Authorization": f"Bearer {token}", "Accept":"application/vnd.github+json"})
@@ -56,7 +55,8 @@ jobs:
             r.raise_for_status()
             data = r.json()
             if "errors" in data:
-              raise SystemExit(f"GraphQL errors: {data['errors']}")
+              # raise with the errors list so caller can inspect/handle
+              raise Exception(data["errors"])
             return data["data"]
           
           def get_project_id(kind: str, login: str, number: int) -> str:
@@ -72,20 +72,16 @@ jobs:
               raise SystemExit(f"Project not found for {kind} '{login}' number {number}")
             return node["id"]
           
-          # Validate issue node id
           if not issue_node_id:
             logging.error("ISSUE_NODE_ID is not present in the workflow context. This workflow expects an issue event context.")
             raise SystemExit(1)
           
-          # 1) Resolve project id
           project_id = get_project_id(owner_kind, owner_login, project_num)
           
-          # 2) Ensure item exists in project (idempotent)
           q_add = """mutation M($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }"""
           item_id = gql(q_add, {"p": project_id, "c": issue_node_id})["addProjectV2ItemById"]["item"]["id"]
           logging.info("Project item id: %s", item_id)
           
-          # 3) Cache fields (with detailed logging)
           fields_by_name = {}
           after = None
           q_fields = """
@@ -155,7 +151,7 @@ jobs:
           def is_single_select_field(f):
             return (f.get("__typename") == "ProjectV2SingleSelectField") or (f.get("dataType") == "SINGLE_SELECT")
           
-          # NOTE: use a String variable and pass the numeric value as a string to satisfy the ProjectV2 API
+          # Try Float variable first (preferred). If API rejects as UNPROCESSABLE, retry as String.
           def set_number(field_name: str, value: float):
             f = fields_by_name.get(field_name)
             if not f:
@@ -164,16 +160,33 @@ jobs:
             if not is_number_field(f):
               logging.warning("Field %s is not a NUMBER field (dataType=%s __typename=%s); skipping", field_name, f.get("dataType"), f.get("__typename"))
               return
-            q = """mutation U($p:ID!,$i:ID!,$f:ID!,$v:String!){
+          
+            # Preferred form: Float variable
+            q_float = """mutation U($p:ID!,$i:ID!,$f:ID!,$v:Float!){
               updateProjectV2ItemFieldValue(input:{
                 projectId:$p,itemId:$i,fieldId:$f,value:{number:$v}
               }){ projectV2Item { id } }
             }"""
             try:
-              gql(q, {"p": project_id, "i": item_id, "f": f["id"], "v": str(value)})
-              logging.info("Set number %s = %s", field_name, value)
+              gql(q_float, {"p": project_id, "i": item_id, "f": f["id"], "v": float(value)})
+              logging.info("Set number %s = %s (via Float variable)", field_name, value)
+              return
             except Exception as e:
-              logging.error("Failed to set number field %s: %s", field_name, e)
+              # If API returns UNPROCESSABLE for value format, retry using a String variable.
+              err_text = str(e)
+              logging.warning("Float attempt to set %s failed: %s. Attempting fallback to String variable.", field_name, err_text)
+          
+            # Fallback: String variable
+            q_str = """mutation U($p:ID!,$i:ID!,$f:ID!,$v:String!){
+              updateProjectV2ItemFieldValue(input:{
+                projectId:$p,itemId:$i,fieldId:$f,value:{number:$v}
+              }){ projectV2Item { id } }
+            }"""
+            try:
+              gql(q_str, {"p": project_id, "i": item_id, "f": f["id"], "v": str(value)})
+              logging.info("Set number %s = %s (via String fallback)", field_name, value)
+            except Exception as e2:
+              logging.error("Failed to set number field %s in both Float and String modes: %s", field_name, e2)
           
           def set_select(field_name: str, option_name: str):
             f = fields_by_name.get(field_name)
@@ -199,7 +212,6 @@ jobs:
             except Exception as e:
               logging.error("Failed to set select field %s to %s: %s", field_name, option_name, e)
           
-          # 4) Parse Impact/Reach/Confidence/Effort from body frontmatter or labels like impact:8
           def extract_num(name):
             m = re.search(rf"(?im)^{name}\s*:\s*([0-9]+(?:\.[0-9]+)?)\b", issue_body)
             if m: return float(m.group(1))
