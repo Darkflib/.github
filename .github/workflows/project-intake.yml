@@ -2,7 +2,9 @@ name: Org Project Intake
 on:
   workflow_call:
     inputs:
-      org_login: {type: string, required: true}
+      org_login: {type: string, required: false}
+      owner_login: {type: string, required: true}
+      owner_kind: {type: string, required: true}
       project_number: {type: string, required: true}
     secrets:
       GH_TOKEN_FOR_PROJECTS: {required: true}   # fine-grained PAT or GitHub App token
