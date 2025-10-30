@@ -239,7 +239,21 @@ jobs:
           set_number("Reach", Reach)
           set_number("Confidence", Confidence)
           set_number("Effort", Effort)
-          set_number("RICE", RICE)
+
+          import math
+          
+          RICE_raw = (Reach * Impact * Confidence) / max(Effort, 0.5)
+          
+          # scale and floor to an integer to avoid decimal/format validation
+          RICE_scaled = math.floor(RICE_raw * 1000)  # e.g. 1.333 -> 1333
+          
+          # set the scaled integer value into the RICE number column
+          set_number("RICE", RICE_scaled)
+          
+          # log both values for debugging
+          logging.info("RICE (raw)=%.4f RICE (scaled int)=%d (Reach=%.1f Impact=%.1f Confidence=%.2f Effort=%.1f)",
+                       RICE_raw, RICE_scaled, Reach, Impact, Confidence, Effort)
+                       
           
           # Optional default Status (only if Status is single-select)
           set_select("Status", "Inbox")
