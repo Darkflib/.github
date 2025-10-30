@@ -1,0 +1,138 @@
+name: Org Project Intake
+on:
+  workflow_call:
+    inputs:
+      org_login: {type: string, required: true}
+      project_number: {type: string, required: true}
+    secrets:
+      GH_TOKEN_FOR_PROJECTS: {required: true}   # fine-grained PAT or GitHub App token
+jobs:
+  run:
+    permissions: {}  # use the passed token, not GITHUB_TOKEN
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install --upgrade pip requests
+      - name: Add issue to Project + compute RICE
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN_FOR_PROJECTS }}
+          ORG_LOGIN: ${{ inputs.org_login }}
+          PROJECT_NUMBER: ${{ inputs.project_number }}
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_LABELS_JSON: ${{ toJson(github.event.issue.labels) }}
+        run: |
+          python - <<'PY'
+          import os, re, json, time, logging, requests
+          logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s %(message)s")
+
+          GQL = "https://api.github.com/graphql"
+          token = os.environ["GITHUB_TOKEN"]
+          org = os.environ["ORG_LOGIN"]
+          project_num = int(os.environ["PROJECT_NUMBER"])
+          issue_node_id = os.environ["ISSUE_NODE_ID"]
+          issue_body = os.environ.get("ISSUE_BODY") or ""
+          labels = [l.get("name","") for l in json.loads(os.environ.get("ISSUE_LABELS_JSON") or "[]")]
+
+          s = requests.Session()
+          s.headers.update({"Authorization": f"Bearer {token}", "Accept":"application/vnd.github+json"})
+
+          def gql(query, variables, op=None):
+            payload = {"query": query, "variables": variables}
+            if op: payload["operationName"] = op
+            r = s.post(GQL, json=payload, timeout=30)
+            if r.status_code == 401: raise SystemExit("Unauthorised token")
+            r.raise_for_status()
+            data = r.json()
+            if "errors" in data:
+              raise SystemExit(f"GraphQL errors: {data['errors']}")
+            return data["data"]
+
+          # 1) Resolve project id
+          q_proj = """query Q($org:String!,$num:Int!){ organization(login:$org){ projectV2(number:$num){ id } } }"""
+          project_id = gql(q_proj, {"org":org, "num":project_num})["organization"]["projectV2"]["id"]
+
+          # 2) Ensure item exists in project (idempotent: adding existing content is fine)
+          q_add = """mutation M($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }"""
+          item_id = gql(q_add, {"p": project_id, "c": issue_node_id})["addProjectV2ItemById"]["item"]["id"]
+          logging.info("Project item id: %s", item_id)
+
+          # 3) Cache fields
+          fields = {}
+          after = None
+          q_fields = """
+          query F($id:ID!,$after:String){
+            node(id:$id){
+              ... on ProjectV2 {
+                fields(first:50, after:$after){
+                  nodes{
+                    id name dataType
+                    ... on ProjectV2SingleSelectField { options { id name } }
+                  }
+                  pageInfo{ hasNextPage endCursor }
+                }
+              }
+            }
+          }"""
+          while True:
+            dd = gql(q_fields, {"id": project_id, "after": after})
+            fs = dd["node"]["fields"]
+            for f in fs["nodes"]:
+              fields[f["name"]] = f
+            if fs["pageInfo"]["hasNextPage"]:
+              after = fs["pageInfo"]["endCursor"]
+            else:
+              break
+
+          def set_number(name, val):
+            f = fields.get(name)
+            if not f or f["dataType"] != "NUMBER":
+              logging.warning("Number field %s missing; skipping", name); return
+            q = """mutation U($p:ID!,$i:ID!,$f:ID!,$v:Float!){
+              updateProjectV2ItemFieldValue(input:{
+                projectId:$p,itemId:$i,fieldId:$f,value:{number:$v}
+              }){ projectV2Item{id} }}"""
+            gql(q, {"p": project_id, "i": item_id, "f": f["id"], "v": float(val)})
+
+          def set_select(name, option):
+            f = fields.get(name)
+            if not f or f["dataType"] != "SINGLE_SELECT":
+              logging.warning("Select field %s missing; skipping", name); return
+            opts = {o["name"]:o["id"] for o in (f.get("options") or [])}
+            if option not in opts:
+              logging.warning("Option %s not found in %s; skipping", option, name); return
+            q = """mutation U($p:ID!,$i:ID!,$f:ID!,$o:String!){
+              updateProjectV2ItemFieldValue(input:{
+                projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}
+              }){ projectV2Item{id} }}"""
+            gql(q, {"p": project_id, "i": item_id, "f": f["id"], "o": opts[option]})
+
+          # 4) Parse Impact/Reach/Confidence/Effort from body frontmatter or labels like impact:8
+          def extract_num(name):
+            # frontmatter style: "Impact: 8" or "impact: 8"
+            m = re.search(rf"(?im)^{name}\s*:\s*([0-9]+(?:\.[0-9]+)?)\b", issue_body)
+            if m: return float(m.group(1))
+            # label style: "impact:8"
+            for lbl in labels:
+              if lbl.lower().startswith(name.lower()+":"):
+                try: return float(lbl.split(":",1)[1])
+                except: pass
+            return None
+
+          Impact = extract_num("Impact") or 5.0
+          Reach = extract_num("Reach") or 1.0
+          Confidence = extract_num("Confidence") or 0.8
+          Effort = extract_num("Effort") or 3.0
+          RICE = (Reach * Impact * Confidence) / max(Effort, 0.5)
+
+          set_number("Impact", Impact)
+          set_number("Reach", Reach)
+          set_number("Confidence", Confidence)
+          set_number("Effort", Effort)
+          set_number("RICE", RICE)
+
+          # Optional default Status
+          set_select("Status", "Inbox")
+          logging.info("RICE=%.2f (Reach=%.1f Impact=%.1f Confidence=%.2f Effort=%.1f)", RICE, Reach, Impact, Confidence, Effort)
+          PY
