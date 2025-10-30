@@ -150,12 +150,12 @@ jobs:
             logging.info("Field: %s -> id:%s dataType:%s __typename:%s options:%s", k, v.get("id"), v.get("dataType"), v.get("__typename"), ", ".join(v.get("options", {}).keys()) if v.get("options") else "")
           
           def is_number_field(f):
-            # Accept either explicit NUMBER dataType, or base ProjectV2Field with dataType NUMBER
             return (f.get("dataType") == "NUMBER") or (f.get("__typename") == "ProjectV2Field" and f.get("dataType") == "NUMBER")
           
           def is_single_select_field(f):
             return (f.get("__typename") == "ProjectV2SingleSelectField") or (f.get("dataType") == "SINGLE_SELECT")
           
+          # NOTE: use a String variable and pass the numeric value as a string to satisfy the ProjectV2 API
           def set_number(field_name: str, value: float):
             f = fields_by_name.get(field_name)
             if not f:
@@ -164,13 +164,13 @@ jobs:
             if not is_number_field(f):
               logging.warning("Field %s is not a NUMBER field (dataType=%s __typename=%s); skipping", field_name, f.get("dataType"), f.get("__typename"))
               return
-            q = """mutation U($p:ID!,$i:ID!,$f:ID!,$v:Float!){
+            q = """mutation U($p:ID!,$i:ID!,$f:ID!,$v:String!){
               updateProjectV2ItemFieldValue(input:{
                 projectId:$p,itemId:$i,fieldId:$f,value:{number:$v}
               }){ projectV2Item { id } }
             }"""
             try:
-              gql(q, {"p": project_id, "i": item_id, "f": f["id"], "v": float(value)})
+              gql(q, {"p": project_id, "i": item_id, "f": f["id"], "v": str(value)})
               logging.info("Set number %s = %s", field_name, value)
             except Exception as e:
               logging.error("Failed to set number field %s: %s", field_name, e)
