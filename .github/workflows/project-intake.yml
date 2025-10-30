@@ -19,7 +19,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN_FOR_PROJECTS }}
           ORG_LOGIN: ${{ inputs.org_login }}
           OWNER_LOGIN: ${{ inputs.owner_login }}
-          OWNER_KIND: ${{ input.owner_kind }} # user or organization
+          OWNER_KIND: ${{ inputs.owner_kind }} # user or organization
           PROJECT_NUMBER: ${{ inputs.project_number }}
           ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
           ISSUE_BODY: ${{ github.event.issue.body }}
