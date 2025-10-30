@@ -7,7 +7,7 @@ on:
       owner_kind: {type: string, required: true}
       project_number: {type: string, required: true}
     secrets:
-      GH_TOKEN_FOR_PROJECTS: {required: true}
+      GH_TOKEN_FOR_PROJECTS: {required: true}   # fine-grained PAT or GitHub App token
 jobs:
   run:
     permissions: {}  # use the passed token, not GITHUB_TOKEN
@@ -29,6 +29,7 @@ jobs:
         run: |
           python - <<'PY'
           import os, re, json, logging, requests, sys
+          from decimal import Decimal, ROUND_HALF_UP
           logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s %(message)s")
           
           GQL = "https://api.github.com/graphql"
@@ -151,7 +152,14 @@ jobs:
           def is_single_select_field(f):
             return (f.get("__typename") == "ProjectV2SingleSelectField") or (f.get("dataType") == "SINGLE_SELECT")
           
-          # Try Float variable first (preferred). If API rejects as UNPROCESSABLE, retry as String.
+          def fmt_num_literal(value, places=4):
+            # Use Decimal for stable rounding and predictable string formatting
+            d = Decimal(str(value)).quantize(Decimal('1.' + '0'*places), rounding=ROUND_HALF_UP)
+            # produce a quoted string literal for insertion into GraphQL
+            return f'"{d.normalize()}"' if d == d.normalize() else f'"{d}"'
+          
+          # Try Float variable first (preferred). If API rejects as UNPROCESSABLE, retry using a
+          # quoted string literal inserted directly into the mutation (avoids variable type mismatch).
           def set_number(field_name: str, value: float):
             f = fields_by_name.get(field_name)
             if not f:
@@ -172,21 +180,21 @@ jobs:
               logging.info("Set number %s = %s (via Float variable)", field_name, value)
               return
             except Exception as e:
-              # If API returns UNPROCESSABLE for value format, retry using a String variable.
               err_text = str(e)
-              logging.warning("Float attempt to set %s failed: %s. Attempting fallback to String variable.", field_name, err_text)
+              logging.warning("Float attempt to set %s failed: %s. Attempting fallback to quoted string literal.", field_name, err_text)
           
-            # Fallback: String variable
-            q_str = """mutation U($p:ID!,$i:ID!,$f:ID!,$v:String!){
-              updateProjectV2ItemFieldValue(input:{
-                projectId:$p,itemId:$i,fieldId:$f,value:{number:$v}
-              }){ projectV2Item { id } }
-            }"""
+            # Fallback: build mutation with a quoted number literal inserted (e.g. value:{number:"1.3333"})
+            v_literal = fmt_num_literal(value, places=4)  # e.g. "\"1.3333\""
+            q_str_literal = f"""mutation U($p:ID!,$i:ID!,$f:ID!){{
+              updateProjectV2ItemFieldValue(input:{{
+                projectId:$p,itemId:$i,fieldId:$f,value:{{number:{v_literal}}}
+              }}){{ projectV2Item {{ id }} }}
+            }}"""
             try:
-              gql(q_str, {"p": project_id, "i": item_id, "f": f["id"], "v": str(value)})
-              logging.info("Set number %s = %s (via String fallback)", field_name, value)
+              gql(q_str_literal, {"p": project_id, "i": item_id, "f": f["id"]})
+              logging.info("Set number %s = %s (via quoted string literal fallback)", field_name, value)
             except Exception as e2:
-              logging.error("Failed to set number field %s in both Float and String modes: %s", field_name, e2)
+              logging.error("Failed to set number field %s in both Float and literal modes: %s", field_name, e2)
           
           def set_select(field_name: str, option_name: str):
             f = fields_by_name.get(field_name)
