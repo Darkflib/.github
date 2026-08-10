@@ -1,0 +1,93 @@
+name: CI
+on:
+  pull_request:
+  push: { branches: ["main"] }
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ACTIONLINT_VERSION: "1.7.7"
+
+jobs:
+  lint:
+    name: Lint YAML and workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install yamllint
+        run: pipx install yamllint
+
+      - name: Lint YAML
+        run: yamllint --strict --config-file .yamllint.yml .
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint --version
+
+      # The `*.yml-template` files are workflows that downstream repositories
+      # copy in, so they are linted too. actionlint only discovers files under
+      # .github/workflows with a .yml/.yaml suffix, so they are staged first.
+      - name: Stage workflow templates for linting
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/templates/.github/workflows"
+          for f in .github/workflows/*.yml-template; do
+            [ -e "$f" ] || continue
+            cp "$f" "${RUNNER_TEMP}/templates/.github/workflows/$(basename "${f%.yml-template}").yml"
+          done
+
+      - name: Lint workflows
+        run: |
+          set -euo pipefail
+          ./actionlint -color
+          ./actionlint -color "${RUNNER_TEMP}/templates/.github/workflows/"*.yml
+
+      - name: Lint YAML templates
+        run: |
+          set -euo pipefail
+          yamllint --strict --config-file .yamllint.yml \
+            "${RUNNER_TEMP}/templates/.github/workflows/"*.yml \
+            .github/dependabot.yml-template
+
+  community-health:
+    name: Community health files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # This repository's whole purpose is to supply org-wide defaults, so a
+      # missing file silently degrades every repository that inherits from it.
+      - name: Check required files are present
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in \
+            CODE_OF_CONDUCT.md \
+            CONTRIBUTING.md \
+            SECURITY.md \
+            FUNDING.yml \
+            .github/CODEOWNERS \
+            .github/PULL_REQUEST_TEMPLATE.md \
+            .github/ISSUE_TEMPLATE/bug_report.yml \
+            .github/ISSUE_TEMPLATE/feature_request.yml \
+            .github/ISSUE_TEMPLATE/config.yml
+          do
+            if [ -s "$f" ]; then
+              echo "ok       $f"
+            else
+              echo "MISSING  $f"
+              missing=1
+            fi
+          done
+          exit "$missing"
