@@ -13,8 +13,8 @@ jobs:
     permissions: {}  # use the passed token, not GITHUB_TOKEN
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.14" }
       - run: python -m pip install --upgrade pip requests
       - name: Add issue to Project + compute RICE
         env:
@@ -31,7 +31,7 @@ jobs:
           import os, re, json, logging, requests, sys
           from decimal import Decimal, ROUND_HALF_UP
           logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s %(message)s")
-          
+
           GQL = "https://api.github.com/graphql"
           token = os.environ.get("GITHUB_TOKEN")
           if not token:
@@ -44,10 +44,10 @@ jobs:
           labels = [l.get("name","") for l in json.loads(os.environ.get("ISSUE_LABELS_JSON") or "[]")]
           owner_login = os.environ.get("OWNER_LOGIN") or org_login
           owner_kind = os.environ.get("OWNER_KIND", "user")
-          
+
           s = requests.Session()
           s.headers.update({"Authorization": f"Bearer {token}", "Accept":"application/vnd.github+json"})
-          
+
           def gql(query, variables, op=None):
             payload = {"query": query, "variables": variables}
             if op: payload["operationName"] = op
@@ -59,7 +59,7 @@ jobs:
               # raise with the errors list so caller can inspect/handle
               raise Exception(data["errors"])
             return data["data"]
-          
+
           def get_project_id(kind: str, login: str, number: int) -> str:
             if kind == "organization":
               q = 'query($login:String!, $num:Int!){ organization(login:$login){ projectV2(number:$num){ id }}}'
@@ -72,17 +72,17 @@ jobs:
             if not node:
               raise SystemExit(f"Project not found for {kind} '{login}' number {number}")
             return node["id"]
-          
+
           if not issue_node_id:
             logging.error("ISSUE_NODE_ID is not present in the workflow context. This workflow expects an issue event context.")
             raise SystemExit(1)
-          
+
           project_id = get_project_id(owner_kind, owner_login, project_num)
-          
+
           q_add = """mutation M($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }"""
           item_id = gql(q_add, {"p": project_id, "c": issue_node_id})["addProjectV2ItemById"]["item"]["id"]
           logging.info("Project item id: %s", item_id)
-          
+
           fields_by_name = {}
           after = None
           q_fields = """
@@ -141,23 +141,23 @@ jobs:
               after = fnode["pageInfo"]["endCursor"]
             else:
               break
-          
+
           logging.info("Loaded %d fields", len(fields_by_name))
           for k, v in sorted(fields_by_name.items()):
             logging.info("Field: %s -> id:%s dataType:%s __typename:%s options:%s", k, v.get("id"), v.get("dataType"), v.get("__typename"), ", ".join(v.get("options", {}).keys()) if v.get("options") else "")
-          
+
           def is_number_field(f):
             return (f.get("dataType") == "NUMBER") or (f.get("__typename") == "ProjectV2Field" and f.get("dataType") == "NUMBER")
-          
+
           def is_single_select_field(f):
             return (f.get("__typename") == "ProjectV2SingleSelectField") or (f.get("dataType") == "SINGLE_SELECT")
-          
+
           def fmt_num_literal(value, places=4):
             # Use Decimal for stable rounding and predictable string formatting
             d = Decimal(str(value)).quantize(Decimal('1.' + '0'*places), rounding=ROUND_HALF_UP)
             # produce a quoted string literal for insertion into GraphQL
             return f'"{d.normalize()}"' if d == d.normalize() else f'"{d}"'
-          
+
           # Try Float variable first (preferred). If API rejects as UNPROCESSABLE, retry using a
           # quoted string literal inserted directly into the mutation (avoids variable type mismatch).
           def set_number(field_name: str, value: float):
@@ -168,7 +168,7 @@ jobs:
             if not is_number_field(f):
               logging.warning("Field %s is not a NUMBER field (dataType=%s __typename=%s); skipping", field_name, f.get("dataType"), f.get("__typename"))
               return
-          
+
             # Preferred form: Float variable
             q_float = """mutation U($p:ID!,$i:ID!,$f:ID!,$v:Float!){
               updateProjectV2ItemFieldValue(input:{
@@ -182,7 +182,7 @@ jobs:
             except Exception as e:
               err_text = str(e)
               logging.warning("Float attempt to set %s failed: %s. Attempting fallback to quoted string literal.", field_name, err_text)
-          
+
             # Fallback: build mutation with a quoted number literal inserted (e.g. value:{number:"1.3333"})
             v_literal = fmt_num_literal(value, places=4)  # e.g. "\"1.3333\""
             q_str_literal = f"""mutation U($p:ID!,$i:ID!,$f:ID!){{
@@ -195,7 +195,7 @@ jobs:
               logging.info("Set number %s = %s (via quoted string literal fallback)", field_name, value)
             except Exception as e2:
               logging.error("Failed to set number field %s in both Float and literal modes: %s", field_name, e2)
-          
+
           def set_select(field_name: str, option_name: str):
             f = fields_by_name.get(field_name)
             if not f:
@@ -219,7 +219,7 @@ jobs:
               logging.info("Set select %s -> %s", field_name, option_name)
             except Exception as e:
               logging.error("Failed to set select field %s to %s: %s", field_name, option_name, e)
-          
+
           def extract_num(name):
             m = re.search(rf"(?im)^{name}\s*:\s*([0-9]+(?:\.[0-9]+)?)\b", issue_body)
             if m: return float(m.group(1))
@@ -228,33 +228,33 @@ jobs:
                 try: return float(lbl.split(":",1)[1])
                 except: pass
             return None
-          
+
           Impact = extract_num("Impact") or 5.0
           Reach = extract_num("Reach") or 1.0
           Confidence = extract_num("Confidence") or 0.8
           Effort = extract_num("Effort") or 3.0
           RICE = (Reach * Impact * Confidence) / max(Effort, 0.5)
-          
+
           set_number("Impact", Impact)
           set_number("Reach", Reach)
           set_number("Confidence", Confidence)
           set_number("Effort", Effort)
 
           import math
-          
+
           RICE_raw = (Reach * Impact * Confidence) / max(Effort, 0.5)
-          
+
           # scale and floor to an integer to avoid decimal/format validation
           RICE_scaled = math.floor(RICE_raw * 1000)  # e.g. 1.333 -> 1333
-          
+
           # set the scaled integer value into the RICE number column
           set_number("RICE", RICE_scaled)
-          
+
           # log both values for debugging
           logging.info("RICE (raw)=%.4f RICE (scaled int)=%d (Reach=%.1f Impact=%.1f Confidence=%.2f Effort=%.1f)",
                        RICE_raw, RICE_scaled, Reach, Impact, Confidence, Effort)
-                       
-          
+
+
           # Optional default Status (only if Status is single-select)
           set_select("Status", "Inbox")
           logging.info("RICE=%.2f (Reach=%.1f Impact=%.1f Confidence=%.2f Effort=%.1f)", RICE, Reach, Impact, Confidence, Effort)

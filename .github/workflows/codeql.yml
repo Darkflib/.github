@@ -3,8 +3,13 @@ on:
   push: { branches: ["main"] }
   pull_request: { branches: ["main"] }
   schedule: [{ cron: "0 3 * * 1" }]
+
+permissions:
+  contents: read
+
 jobs:
   analyze:
+    name: Analyze
     permissions:
       actions: read
       contents: read
@@ -12,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: github/codeql-action/init@v3
-        with: { languages: "python" }
-      - uses: github/codeql-action/analyze@v3
+      # This repository holds community-health files and reusable workflows,
+      # not application code, so `actions` is the only language present.
+      - uses: github/codeql-action/init@v4
+        with: { languages: "actions" }
+      - uses: github/codeql-action/analyze@v4
