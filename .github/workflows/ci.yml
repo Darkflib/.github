@@ -19,7 +19,7 @@ jobs:
     name: Lint YAML and workflows
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install yamllint
         run: pipx install yamllint
@@ -64,7 +64,7 @@ jobs:
     name: Community health files
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # This repository's whole purpose is to supply org-wide defaults, so a
       # missing file silently degrades every repository that inherits from it.
